@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>डेटिंग ऐप</title>
+    <!-- Firebase Libraries -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Firebase Config and Auth
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let userId = null;
+        let myProfileData = null;
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                }
+            } else {
+                await signInAnonymously(auth);
+            }
+            console.log("Firebase Auth State Changed. User ID:", userId);
+
+            // Fetch and set user profile
+            const myProfileRef = doc(db, `artifacts/${appId}/users/${userId}/myProfiles`, userId);
+            onSnapshot(myProfileRef, (doc) => {
+                if (doc.exists()) {
+                    myProfileData = doc.data();
+                    showMyProfile();
+                } else {
+                    myProfileData = null;
+                    showSwipeView();
+                }
+            });
+
+            // Start listening to profiles from others
+            listenToProfiles();
+            listenToMatches();
+        });
+
+        // Other app-specific variables and functions
+        let profiles = [];
+        let currentIndex = 0;
+        let matches = [];
+
+        // DOM Elements
+        let mainContainer, formContainer, myProfileContainer, matchesContainer, chatContainer;
+        let profileContainer, noProfilesMessage, actionButtons, dislikeBtn, likeBtn, createProfileBtn;
+        let profileForm, cancelFormBtn;
+        let myProfileInfo, editProfileBtn;
+        let matchesList, chatHeader, chatMessages, chatInput, chatSendBtn, backToMatchesBtn;
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            mainContainer = document.getElementById('main-container');
+            formContainer = document.getElementById('form-container');
+            myProfileContainer = document.getElementById('my-profile-container');
+            matchesContainer = document.getElementById('matches-container');
+            chatContainer = document.getElementById('chat-container');
+
+            profileContainer = document.getElementById('profile-container');
+            noProfilesMessage = document.getElementById('no-profiles');
+            actionButtons = document.getElementById('action-buttons');
+            dislikeBtn = document.getElementById('dislike-btn');
+            likeBtn = document.getElementById('like-btn');
+            createProfileBtn = document.getElementById('create-profile-btn');
+
+            profileForm = document.getElementById('profile-form');
+            cancelFormBtn = document.getElementById('cancel-form-btn');
+
+            myProfileInfo = document.getElementById('my-profile-info');
+            editProfileBtn = document.getElementById('edit-profile-btn');
+
+            matchesList = document.getElementById('matches-list');
+            chatHeader = document.getElementById('chat-header');
+            chatMessages = document.getElementById('chat-messages');
+            chatInput = document.getElementById('chat-input');
+            chatSendBtn = document.getElementById('chat-send-btn');
+            backToMatchesBtn = document.getElementById('back-to-matches-btn');
+
+            // Event Listeners
+            if (dislikeBtn) dislikeBtn.addEventListener('click', () => nextProfile());
+            if (likeBtn) likeBtn.addEventListener('click', async () => {
+                const currentProfile = profiles[currentIndex];
+                if (!currentProfile) return;
+
+                // Save match to Firestore
+                const matchesRef = collection(db, `artifacts/${appId}/users/${userId}/matches`);
+                await setDoc(doc(matchesRef, currentProfile.id), currentProfile);
+                console.log(`Matched with ${currentProfile.name}!`);
+                
+                nextProfile();
+            });
+            
+            if (createProfileBtn) createProfileBtn.addEventListener('click', () => showView('form'));
+            
+            if (editProfileBtn) editProfileBtn.addEventListener('click', () => {
+                showView('form');
+                // Populate form with existing data
+                document.getElementById('name').value = myProfileData.name;
+                document.getElementById('age').value = myProfileData.age;
+                document.getElementById('bio').value = myProfileData.bio;
+            });
+
+            if (profileForm) profileForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const name = document.getElementById('name').value;
+                const age = document.getElementById('age').value;
+                const bio = document.getElementById('bio').value;
+                const imageInput = document.getElementById('image');
+                
+                let imageUrl = myProfileData ? myProfileData.imageUrl : `https://placehold.co/400x500/D1D5DB/4B5563?text=${name}`;
+
+                if (imageInput.files.length > 0) {
+                    const file = imageInput.files[0];
+                    if (file.size > 5 * 1024 * 1024) { // 5MB in bytes
+                        console.error("File size exceeds 5MB limit.");
+                        alert("फाइल 5MB से बड़ी है। कृपया छोटी फाइल चुनें।");
+                        return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        imageUrl = e.target.result;
+                        await saveProfile(name, age, bio, imageUrl);
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    await saveProfile(name, age, bio, imageUrl);
+                }
+            });
+            
+            if (cancelFormBtn) cancelFormBtn.addEventListener('click', () => {
+                if (myProfileData) {
+                    showMyProfile();
+                } else {
+                    showView('swipe');
+                }
+            });
+
+            // Navigation
+            document.getElementById('nav-swipe-btn').addEventListener('click', () => showSwipeView());
+            document.getElementById('nav-my-profile-btn').addEventListener('click', () => showMyProfile());
+            document.getElementById('nav-matches-btn').addEventListener('click', () => showMatchesView());
+            
+            // Chat demo
+            if (chatSendBtn) chatSendBtn.addEventListener('click', () => {
+                const message = chatInput.value.trim();
+                if (message) {
+                    const userMessageEl = document.createElement('div');
+                    userMessageEl.className = 'p-2 my-2 bg-blue-100 rounded-lg text-right';
+                    userMessageEl.textContent = message;
+                    chatMessages.appendChild(userMessageEl);
+
+                    chatInput.value = '';
+                    chatMessages.scrollTop = chatMessages.scrollHeight; // Auto-scroll
+                    
+                    const loadingEl = document.createElement('div');
+                    loadingEl.className = 'p-2 my-2 text-center text-gray-400';
+                    loadingEl.textContent = 'typing...';
+                    chatMessages.appendChild(loadingEl);
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+                    // Send message to Gemini
+                    sendMessage(message, loadingEl);
+                }
+            });
+
+            if(backToMatchesBtn) backToMatchesBtn.addEventListener('click', () => showMatchesView());
+
+        });
+        
+        // Function to show views
+        function showView(view) {
+            mainContainer.classList.add('hidden');
+            formContainer.classList.add('hidden');
+            myProfileContainer.classList.add('hidden');
+            matchesContainer.classList.add('hidden');
+            chatContainer.classList.add('hidden');
+            
+            if (view === 'swipe') {
+                mainContainer.classList.remove('hidden');
+            } else if (view === 'form') {
+                formContainer.classList.remove('hidden');
+            } else if (view === 'myProfile') {
+                myProfileContainer.classList.remove('hidden');
+            } else if (view === 'matches') {
+                matchesContainer.classList.remove('hidden');
+            } else if (view === 'chat') {
+                chatContainer.classList.remove('hidden');
+            }
+        }
+
+        function showSwipeView() {
+            if (myProfileData) {
+                showView('swipe');
+                renderProfile(profiles[currentIndex]);
+            } else {
+                showView('form');
+            }
+        }
+
+        function showMyProfile() {
+            showView('myProfile');
+            if (myProfileData) {
+                myProfileInfo.innerHTML = `
+                    <img src="${myProfileData.imageUrl}" alt="${myProfileData.name}" class="w-full h-80 object-cover rounded-xl mb-4 shadow-md">
+                    <h2 class="text-3xl font-bold text-gray-800">${myProfileData.name}, <span class="text-gray-600">${myProfileData.age}</span></h2>
+                    <p class="mt-4 text-gray-600">${myProfileData.bio}</p>
+                    <p class="mt-4 text-sm text-gray-400">यूजर आईडी: ${userId}</p>
+                `;
+            } else {
+                myProfileInfo.innerHTML = `<p class="text-red-500">प्रोफाइल डेटा नहीं मिला।</p>`;
+            }
+        }
+
+        function showMatchesView() {
+            showView('matches');
+            renderMatches();
+        }
+
+        function showChatView(match) {
+            showView('chat');
+            chatHeader.innerHTML = `
+                <button id="back-to-matches-btn" class="text-blue-500 hover:underline">&#8592; वापस जाएं</button>
+                <h2 class="text-xl font-bold text-gray-800">${match.name} से चैट (Powered by Gemini AI)</h2>
+            `;
+            chatMessages.innerHTML = `
+                <div class="p-2 my-2 bg-gray-200 rounded-lg text-left">हाय! मैं Gemini AI हूँ। आप कुछ भी पूछ सकते हैं।</div>
+            `;
+        }
+        
+        async function sendMessage(prompt, loadingEl) {
+            const apiKey = ""; // aapko apni API key yahaan daalni hogi
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }]
+            };
+
+            let response;
+            try {
+                response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status}`);
+                }
+
+                const result = await response.json();
+                const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || "Maaf kijie, main abhi response nahi de sakta.";
+                
+                chatMessages.removeChild(loadingEl);
+
+                const geminiMessageEl = document.createElement('div');
+                geminiMessageEl.className = 'p-2 my-2 bg-gray-200 rounded-lg text-left';
+                geminiMessageEl.textContent = text;
+                chatMessages.appendChild(geminiMessageEl);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            } catch (error) {
+                console.error("Error sending message to Gemini:", error);
+                if (loadingEl) {
+                    loadingEl.textContent = 'Error. Please try again.';
+                    setTimeout(() => chatMessages.removeChild(loadingEl), 3000);
+                }
+            }
+        }
+
+        // Firestore listeners
+        const listenToProfiles = () => {
+             const profilesRef = collection(db, `artifacts/${appId}/public/data/profiles`);
+             onSnapshot(query(profilesRef), (snapshot) => {
+                 profiles = [];
+                 snapshot.forEach((doc) => {
+                     const profile = { id: doc.id, ...doc.data() };
+                     if (profile.id !== userId) { // Exclude own profile
+                        profiles.push(profile);
+                     }
+                 });
+                 // Re-render if profiles change
+                 renderProfile(profiles[currentIndex]);
+             });
+        }
+
+        const listenToMatches = () => {
+            const matchesRef = collection(db, `artifacts/${appId}/users/${userId}/matches`);
+            onSnapshot(query(matchesRef), (snapshot) => {
+                matches = [];
+                snapshot.forEach((doc) => {
+                    matches.push({ id: doc.id, ...doc.data() });
+                });
+                if (matchesContainer.classList.contains('hidden') === false) {
+                    renderMatches();
+                }
+            });
+        }
+
+        // Profile rendering functions
+        function renderProfile(profile) {
+            if (!profile) {
+                profileContainer.innerHTML = '';
+                noProfilesMessage.classList.remove('hidden');
+                actionButtons.classList.add('hidden');
+                return;
+            }
+            noProfilesMessage.classList.add('hidden');
+            actionButtons.classList.remove('hidden');
+
+            const card = document.createElement('div');
+            card.className = "profile-card bg-white p-4 rounded-3xl shadow-xl transform scale-100 transition-all duration-300";
+            card.innerHTML = `
+                <img src="${profile.imageUrl}" alt="${profile.name}" onerror="this.onerror=null; this.src='https://placehold.co/400x500/E5E7EB/4B5563?text=प्रोफाइल+इमेज';" class="w-full h-80 object-cover rounded-xl mb-4 shadow-md">
+                <h2 class="text-xl font-bold text-gray-800">${profile.name}, <span class="text-gray-600">${profile.age}</span></h2>
+                <p class="mt-2 text-gray-600">${profile.bio}</p>
+                <p class="mt-2 text-xs text-gray-400">यूजर आईडी: ${profile.id}</p>
+            `;
+            profileContainer.innerHTML = '';
+            profileContainer.appendChild(card);
+        }
+        
+        function nextProfile() {
+            const currentCard = profileContainer.querySelector('.profile-card');
+            if (currentCard) {
+                currentCard.style.transform = 'scale(0.9)';
+                currentCard.style.opacity = '0';
+            }
+            
+            setTimeout(() => {
+                currentIndex++;
+                if (currentIndex < profiles.length) {
+                    renderProfile(profiles[currentIndex]);
+                } else {
+                    renderProfile(null);
+                }
+            }, 300);
+        }
+
+        function renderMatches() {
+            if (matches.length === 0) {
+                matchesList.innerHTML = '<p class="text-gray-500 text-center">अभी कोई मैच नहीं है।</p>';
+                return;
+            }
+            matchesList.innerHTML = '';
+            matches.forEach(match => {
+                const matchItem = document.createElement('div');
+                matchItem.className = 'flex items-center p-4 bg-gray-50 rounded-lg shadow-sm mb-4 cursor-pointer hover:bg-gray-100 transition-colors duration-200';
+                matchItem.innerHTML = `
+                    <img src="${match.imageUrl}" alt="${match.name}" class="w-16 h-16 rounded-full object-cover mr-4">
+                    <div class="flex-1">
+                        <h3 class="text-lg font-bold">${match.name}</h3>
+                        <p class="text-sm text-gray-600">${match.bio}</p>
+                    </div>
+                `;
+                matchItem.addEventListener('click', () => showChatView(match));
+                matchesList.appendChild(matchItem);
+            });
+        }
+        
+        async function saveProfile(name, age, bio, imageUrl) {
+            const profile = {
+                name: name,
+                age: parseInt(age, 10),
+                bio: bio,
+                imageUrl: imageUrl,
+                timestamp: Date.now()
+            };
+            
+            // Save to private and public collections
+            const myProfileRef = doc(db, `artifacts/${appId}/users/${userId}/myProfiles`, userId);
+            const publicProfileRef = doc(db, `artifacts/${appId}/public/data/profiles`, userId);
+            
+            try {
+                await setDoc(myProfileRef, profile, { merge: true });
+                await setDoc(publicProfileRef, profile, { merge: true });
+                console.log("प्रोफाइल सेव हो गई!");
+                profileForm.reset();
+                showMyProfile(); // Show the user's own profile after saving
+            } catch (e) {
+                console.error("प्रोफाइल सेव करने में त्रुटि:", e);
+            }
+        }
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+        }
+        .profile-card {
+            transition: transform 0.5s ease-in-out;
+            transform: scale(1);
+        }
+        .nav-btn {
+            @apply flex-1 p-3 text-sm font-semibold rounded-full transition-colors duration-300;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <!-- नेविगेशन बार -->
+    <nav class="fixed top-4 w-full max-w-sm sm:max-w-md lg:max-w-lg bg-white p-2 rounded-full shadow-lg flex justify-between space-x-2 z-10">
+        <button id="nav-swipe-btn" class="nav-btn bg-blue-500 text-white hover:bg-blue-600">स्वाइप</button>
+        <button id="nav-my-profile-btn" class="nav-btn text-gray-600 hover:bg-gray-200">मेरी प्रोफाइल</button>
+        <button id="nav-matches-btn" class="nav-btn text-gray-600 hover:bg-gray-200">मैच</button>
+    </nav>
+    
+    <!-- मुख्य कंटेनर (स्वाइप व्यू) -->
+    <div id="main-container" class="bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm sm:max-w-md lg:max-w-lg text-center transform transition-all duration-500 mt-20">
+        <h1 class="text-3xl font-bold mb-4 text-gray-800">Swipes</h1>
+        <div id="profile-container" class="relative">
+            <!-- प्रोफाइल कार्ड यहां JavaScript द्वारा लोड होगा -->
+            <div id="no-profiles" class="hidden text-gray-500 text-lg">
+                कोई और प्रोफाइल नहीं है।
+            </div>
+        </div>
+        <div id="action-buttons" class="mt-6 flex justify-center space-x-4">
+            <button id="dislike-btn" class="bg-gray-400 text-white rounded-full p-4 hover:bg-gray-500 transition-colors duration-300">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+            <button id="like-btn" class="bg-green-500 text-white rounded-full p-4 hover:bg-green-600 transition-colors duration-300">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+            </button>
+        </div>
+    </div>
+    
+    <!-- मेरी प्रोफाइल कंटेनर -->
+    <div id="my-profile-container" class="hidden bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm sm:max-w-md lg:max-w-lg mt-20 text-center">
+        <h2 class="text-3xl font-bold mb-4 text-gray-800">मेरी प्रोफाइल</h2>
+        <div id="my-profile-info" class="text-left">
+            <!-- मेरी प्रोफाइल यहां लोड होगी -->
+        </div>
+        <button id="edit-profile-btn" class="w-full mt-6 bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 transition-colors duration-300">प्रोफाइल एडिट करें</button>
+    </div>
+
+    <!-- मैच कंटेनर -->
+    <div id="matches-container" class="hidden bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm sm:max-w-md lg:max-w-lg mt-20">
+        <h2 class="text-3xl font-bold mb-4 text-gray-800">आपके मैच</h2>
+        <div id="matches-list">
+            <!-- मैच लिस्ट यहां लोड होगी -->
+        </div>
+    </div>
+
+    <!-- चैट कंटेनर -->
+    <div id="chat-container" class="hidden bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm sm:max-w-md lg:max-w-lg mt-20">
+        <div id="chat-header" class="flex items-center space-x-4 mb-4">
+            <!-- चैट हेडर यहां लोड होगा -->
+        </div>
+        <div id="chat-messages" class="h-64 overflow-y-auto border rounded-lg p-4 mb-4">
+            <!-- चैट मैसेजेस यहां लोड होंगे -->
+        </div>
+        <div class="flex">
+            <input type="text" id="chat-input" placeholder="संदेश लिखें..." class="flex-1 px-4 py-2 border rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button id="chat-send-btn" class="bg-blue-500 text-white px-4 py-2 rounded-r-lg hover:bg-blue-600 transition-colors duration-300">भेजें</button>
+        </div>
+    </div>
+
+    <!-- प्रोफाइल बनाने का फॉर्म -->
+    <div id="form-container" class="hidden bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm sm:max-w-md lg:max-w-lg mt-20">
+        <h2 class="text-2xl font-bold mb-4 text-gray-800">प्रोफाइल बनाएं</h2>
+        <form id="profile-form" class="space-y-4">
+            <div>
+                <label for="name" class="block text-left text-gray-700">नाम:</label>
+                <input type="text" id="name" required class="w-full px-4 py-2 mt-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label for="age" class="block text-left text-gray-700">उम्र:</label>
+                <input type="number" id="age" required class="w-full px-4 py-2 mt-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label for="bio" class="block text-left text-gray-700">बायो:</label>
+                <textarea id="bio" required class="w-full px-4 py-2 mt-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+            </div>
+            <div>
+                <label for="image" class="block text-left text-gray-700">प्रोफ़ाइल इमेज अपलोड करें (5MB तक):</label>
+                <input type="file" id="image" accept="image/*" class="w-full px-4 py-2 mt-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <button type="submit" class="w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 transition-colors duration-300">प्रोफाइल सेव करें</button>
+            <button type="button" id="cancel-form-btn" class="w-full bg-gray-300 text-gray-700 py-2 rounded-lg mt-2 hover:bg-gray-400 transition-colors duration-300">कैंसिल करें</button>
+        </form>
+    </div>
+</body>
+</html>
